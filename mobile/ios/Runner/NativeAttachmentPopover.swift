@@ -982,6 +982,7 @@ final class NativeAttachmentPopoverViewController:
       Self.removeTemporaryFiles(temporaryPaths)
       return
     }
+    NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(in: view.window)
     isFinishing = true
     view.isUserInteractionEnabled = false
     selectionGeneration += 1

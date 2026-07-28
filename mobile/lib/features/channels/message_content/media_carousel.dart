@@ -1,7 +1,6 @@
 part of '../message_content.dart';
 
 const _messageMediaCarouselHeight = 220.0;
-const _messageMediaCarouselTopPadding = 2.0;
 
 @immutable
 class _MessageGalleryItem {
@@ -142,7 +141,7 @@ class _MessageImageCarousel extends HookConsumerWidget {
               fontWeight: FontWeight.w400,
             ),
           ),
-          const SizedBox(height: Grid.half + _messageMediaCarouselTopPadding),
+          const SizedBox(height: Grid.half + Grid.quarter),
           LayoutBuilder(
             builder: (context, constraints) {
               final contentWidth = constraints.hasBoundedWidth
