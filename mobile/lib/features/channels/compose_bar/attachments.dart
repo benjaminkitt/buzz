@@ -2,8 +2,13 @@ part of '../compose_bar.dart';
 
 enum _AttachmentSurface { closed, menu, camera, photos }
 
-const _attachmentMenuWidth = 176.0;
-const _attachmentMenuHeight = 208.0;
+const _attachmentMenuWidth = 216.0;
+const _attachmentMenuHeight = 264.0;
+const _attachmentMenuPadding = Grid.xs;
+const _attachmentMenuItemHeight = 52.0;
+const _attachmentMenuItemSpacing = Grid.xxs;
+const _attachmentMenuIconSize = 24.0;
+const _attachmentMenuIconSlotWidth = 28.0;
 const _attachmentExpandedHeight = 372.0;
 
 class _AttachmentSurfacePanel extends HookWidget {
@@ -81,10 +86,24 @@ class _AttachmentSurfacePanel extends HookWidget {
 
     final visibleExpandedSurface =
         renderedExpandedSurface.value ?? (isExpanded ? surface : null);
+    final cameraInitializationReady =
+        reducedMotion ||
+        (surface == _AttachmentSurface.camera && rawProgress >= 1);
     final expandedContent = switch (visibleExpandedSurface) {
       _AttachmentSurface.camera => KeyedSubtree(
         key: const ValueKey('camera-preview'),
-        child: _InlineCameraPreview(onClose: onBack, onCapture: onCapture),
+        child: KeyedSubtree(
+          key: ValueKey(
+            cameraInitializationReady
+                ? 'camera-initialization-ready'
+                : 'camera-initialization-deferred',
+          ),
+          child: _InlineCameraPreview(
+            initializeCamera: cameraInitializationReady,
+            onClose: onBack,
+            onCapture: onCapture,
+          ),
+        ),
       ),
       _AttachmentSurface.photos => KeyedSubtree(
         key: const ValueKey('photo-gallery'),
@@ -304,10 +323,11 @@ class _AttachmentMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
+      key: const ValueKey('attachment-menu'),
       width: _attachmentMenuWidth,
       height: _attachmentMenuHeight,
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        padding: const EdgeInsets.all(_attachmentMenuPadding),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -316,16 +336,19 @@ class _AttachmentMenu extends StatelessWidget {
               label: 'Camera',
               onTap: onCamera,
             ),
+            const SizedBox(height: _attachmentMenuItemSpacing),
             _AttachmentMenuItem(
               icon: LucideIcons.images,
               label: 'Photos',
               onTap: onPhotos,
             ),
+            const SizedBox(height: _attachmentMenuItemSpacing),
             _AttachmentMenuItem(
               icon: LucideIcons.video,
               label: 'Video',
               onTap: onVideo,
             ),
+            const SizedBox(height: _attachmentMenuItemSpacing),
             _AttachmentMenuItem(
               icon: LucideIcons.file,
               label: 'Files',
@@ -352,21 +375,40 @@ class _AttachmentMenuItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 48,
+      key: ValueKey('attachment-menu-item-${label.toLowerCase()}'),
+      height: _attachmentMenuItemHeight,
       child: Tooltip(
         message: label,
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.twelve),
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
             child: Row(
               children: [
-                Icon(icon, size: 20, color: context.colors.onSurfaceVariant),
+                SizedBox(
+                  key: ValueKey('attachment-menu-icon-${label.toLowerCase()}'),
+                  width: _attachmentMenuIconSlotWidth,
+                  child: Center(
+                    child: Icon(
+                      icon,
+                      size: _attachmentMenuIconSize,
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
                 const SizedBox(width: Grid.xxs),
-                Text(
-                  label,
-                  style: context.textTheme.bodyLarge?.copyWith(
-                    color: context.colors.onSurface,
+                Expanded(
+                  child: Text(
+                    label,
+                    key: ValueKey(
+                      'attachment-menu-label-${label.toLowerCase()}',
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.textTheme.titleMedium?.copyWith(
+                      color: context.colors.onSurface,
+                      fontWeight: FontWeight.w400,
+                    ),
                   ),
                 ),
               ],

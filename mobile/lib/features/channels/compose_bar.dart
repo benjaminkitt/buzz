@@ -735,7 +735,6 @@ class ComposeBar extends HookConsumerWidget {
         return;
       }
 
-      focusNode.unfocus();
       unawaited(
         iosAttachmentPopover
             .present(

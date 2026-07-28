@@ -17,12 +17,12 @@ final class NativeAttachmentPopoverViewController:
     case camera
   }
 
+  private typealias ContentPreparation = (@escaping () -> Void) -> Void
+
   private let channel: FlutterMethodChannel
   private let expandedWidth: CGFloat
-  private let menuSize = CGSize(width: 176, height: 208)
+  private let menuSize = NativeAttachmentMenuLayout.size
   private let expandedHeight: CGFloat = 372
-  private let expandedHorizontalOffset: CGFloat = 10
-  private let expandedVerticalOffset: CGFloat = 40
   private let contentHost = UIView()
   private let cameraSession = AVCaptureSession()
   private let cameraOutput = AVCapturePhotoOutput()
@@ -50,6 +50,7 @@ final class NativeAttachmentPopoverViewController:
   private var activeCameraCaptureID: Int64?
   private var isFinishing = false
   private var didNotifyDismissal = false
+  private var keyboardDismissalOffset: CGFloat = 0
 
   var onDismiss: (() -> Void)?
 
@@ -125,13 +126,26 @@ final class NativeAttachmentPopoverViewController:
     let stack = UIStackView()
     stack.axis = .vertical
     stack.distribution = .fillEqually
+    stack.spacing = NativeAttachmentMenuLayout.itemSpacing
     stack.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(stack)
     NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-      stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
+      stack.leadingAnchor.constraint(
+        equalTo: container.leadingAnchor,
+        constant: NativeAttachmentMenuLayout.contentPadding
+      ),
+      stack.trailingAnchor.constraint(
+        equalTo: container.trailingAnchor,
+        constant: -NativeAttachmentMenuLayout.contentPadding
+      ),
+      stack.topAnchor.constraint(
+        equalTo: container.topAnchor,
+        constant: NativeAttachmentMenuLayout.contentPadding
+      ),
+      stack.bottomAnchor.constraint(
+        equalTo: container.bottomAnchor,
+        constant: -NativeAttachmentMenuLayout.contentPadding
+      ),
     ])
 
     stack.addArrangedSubview(
@@ -171,6 +185,7 @@ final class NativeAttachmentPopoverViewController:
 
   private func showPhotos() {
     guard surface != .photos else { return }
+    prepareForExpandedSurface()
     stopCamera()
 
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
@@ -192,16 +207,14 @@ final class NativeAttachmentPopoverViewController:
 
     let container = UIView()
     container.backgroundColor = .clear
+    container.clipsToBounds = true
     addChild(picker)
     picker.view.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(picker.view)
     NSLayoutConstraint.activate([
       picker.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
       picker.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      picker.view.topAnchor.constraint(
-        equalTo: container.topAnchor,
-        constant: -8
-      ),
+      picker.view.topAnchor.constraint(equalTo: container.topAnchor),
       picker.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
     ])
     picker.didMove(toParent: self)
@@ -227,11 +240,32 @@ final class NativeAttachmentPopoverViewController:
       trailing: actionButton
     )
 
-    transition(to: .photos, content: container)
+    transition(
+      to: .photos,
+      content: container,
+      preparation: { [weak picker] reveal in
+        guard let picker else {
+          reveal()
+          return
+        }
+        // PHPicker ignores scale changes while its remote grid is still
+        // adapting to the compact menu bounds. Give it one main-loop turn at
+        // the final popover size, apply the scale offscreen, then reveal it.
+        DispatchQueue.main.async {
+          picker.view.layoutIfNeeded()
+          EmbeddedPhotoPickerLayout.applyPreferredScale {
+            picker.zoomIn()
+            picker.view.layoutIfNeeded()
+          }
+          DispatchQueue.main.async(execute: reveal)
+        }
+      }
+    )
   }
 
   private func showCamera() {
     guard surface != .camera else { return }
+    prepareForExpandedSurface()
     removePhotoPicker()
 
     let container = UIView()
@@ -288,9 +322,28 @@ final class NativeAttachmentPopoverViewController:
     stopCamera()
 
     let menu = makeMenuView()
-    transition(to: .menu, content: menu) { [weak self] in
-      self?.removePhotoPicker()
+    transition(
+      to: .menu,
+      content: menu,
+      completion: { [weak self] in
+        self?.removePhotoPicker()
+      }
+    )
+  }
+
+  private func prepareForExpandedSurface() {
+    if
+      let sourceHost = popoverPresentationController?.sourceView?.superview
+    {
+      keyboardDismissalOffset = max(
+        keyboardDismissalOffset,
+        NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+          containerBounds: sourceHost.bounds,
+          keyboardLayoutFrame: sourceHost.keyboardLayoutGuide.layoutFrame
+        )
+      )
     }
+    NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(in: view.window)
   }
 
   private func installContent(_ content: UIView) {
@@ -308,6 +361,7 @@ final class NativeAttachmentPopoverViewController:
   private func transition(
     to nextSurface: Surface,
     content nextView: UIView,
+    preparation: ContentPreparation? = nil,
     completion: (() -> Void)? = nil
   ) {
     let previousView = visibleContentView
@@ -327,50 +381,61 @@ final class NativeAttachmentPopoverViewController:
     ])
     contentHost.layoutIfNeeded()
 
-    let direction: CGFloat = isExpanding ? 34 : -34
-    nextView.alpha = UIAccessibility.isReduceMotionEnabled ? 0 : 0.01
-    nextView.transform =
-      UIAccessibility.isReduceMotionEnabled
-      ? .identity
-      : CGAffineTransform(translationX: direction, y: 0).scaledBy(
-        x: 0.97,
-        y: 0.97
-      )
+    let shouldAnimate = !UIAccessibility.isReduceMotionEnabled
+    // Do not expose embedded surfaces while the popover changes size. In
+    // particular, PHPicker visibly reflows its grid from the compact menu
+    // width to the expanded width if it is allowed to paint during this step.
+    nextView.alpha = 0
     visibleContentView = nextView
     surface = nextSurface
 
-    let duration = UIAccessibility.isReduceMotionEnabled ? 0.16 : 0.36
+    let duration = shouldAnimate ? (isExpanding ? 0.24 : 0.2) : 0
     UIView.animate(
       withDuration: duration,
       delay: 0,
-      usingSpringWithDamping: 0.86,
-      initialSpringVelocity: 0.18,
-      options: [.beginFromCurrentState, .allowUserInteraction]
+      options: [
+        .beginFromCurrentState,
+        .allowUserInteraction,
+        .curveEaseInOut,
+      ]
     ) {
       self.preferredContentSize = targetSize
       if let popover = self.popoverPresentationController,
         let sourceView = popover.sourceView
       {
-        popover.sourceRect = sourceView.bounds.offsetBy(
-          dx: isExpanding ? self.expandedHorizontalOffset : 0,
-          dy: isExpanding ? self.expandedVerticalOffset : 0
+        popover.sourceRect = NativeAttachmentPopoverAnchorLayout.sourceRect(
+          anchorBounds: sourceView.bounds,
+          keyboardDismissalOffset: self.keyboardDismissalOffset,
+          isExpanded: isExpanding
         )
       }
       previousView?.alpha = 0
-      previousView?.transform =
-        UIAccessibility.isReduceMotionEnabled
-        ? .identity
-        : CGAffineTransform(translationX: -direction, y: 0).scaledBy(
-          x: 0.97,
-          y: 0.97
-        )
-      nextView.alpha = 1
-      nextView.transform = .identity
       self.view.layoutIfNeeded()
     } completion: { _ in
       previousView?.removeFromSuperview()
-      previousView?.transform = .identity
-      completion?()
+      self.view.layoutIfNeeded()
+
+      let reveal = {
+        UIView.animate(
+          withDuration: shouldAnimate ? 0.14 : 0,
+          delay: 0,
+          options: [
+            .beginFromCurrentState,
+            .allowUserInteraction,
+            .curveEaseOut,
+          ]
+        ) {
+          nextView.alpha = 1
+        } completion: { _ in
+          completion?()
+        }
+      }
+
+      if let preparation {
+        preparation(reveal)
+      } else {
+        reveal()
+      }
     }
   }
 

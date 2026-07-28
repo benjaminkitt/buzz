@@ -6,6 +6,80 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  @MainActor
+  func testExpandedAttachmentSurfaceDismissesKeyboard() {
+    let window = KeyboardDismissalSpyWindow()
+
+    NativeAttachmentExpandedSurfaceBehavior.dismissKeyboard(in: window)
+
+    XCTAssertTrue(window.didForceEndEditing)
+  }
+
+  func testExpandedAttachmentSurfaceMeasuresKeyboardOverlap() {
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(
+          x: 0,
+          y: 544,
+          width: 390,
+          height: 300
+        )
+      ),
+      300
+    )
+    XCTAssertEqual(
+      NativeAttachmentExpandedSurfaceBehavior.keyboardOverlap(
+        containerBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+        keyboardLayoutFrame: CGRect(x: 0, y: 844, width: 390, height: 0)
+      ),
+      0
+    )
+  }
+
+  func testAttachmentMenuReturnsToKeyboardDismissedAnchor() {
+    let anchorBounds = CGRect(x: 0, y: 0, width: 44, height: 44)
+
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: true
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 340)
+    )
+    XCTAssertEqual(
+      NativeAttachmentPopoverAnchorLayout.sourceRect(
+        anchorBounds: anchorBounds,
+        keyboardDismissalOffset: 300,
+        isExpanded: false
+      ),
+      anchorBounds.offsetBy(dx: 0, dy: 300)
+    )
+  }
+
+  func testEmbeddedPhotoPickerAppliesOneZoomInStepWithoutAnimation() {
+    var zoomInCalls = 0
+    var animationsWereEnabled = true
+
+    EmbeddedPhotoPickerLayout.applyPreferredScale {
+      zoomInCalls += 1
+      animationsWereEnabled = UIView.areAnimationsEnabled
+    }
+
+    XCTAssertEqual(zoomInCalls, 1)
+    XCTAssertFalse(animationsWereEnabled)
+  }
+
+  func testNativeAttachmentMenuUsesRoomyRowsAndInsets() {
+    XCTAssertEqual(NativeAttachmentMenuLayout.size.width, 216)
+    XCTAssertEqual(NativeAttachmentMenuLayout.size.height, 264)
+    XCTAssertEqual(NativeAttachmentMenuLayout.contentPadding, 16)
+    XCTAssertEqual(NativeAttachmentMenuLayout.itemHeight, 52)
+    XCTAssertEqual(NativeAttachmentMenuLayout.itemSpacing, 8)
+    XCTAssertEqual(NativeAttachmentMenuLayout.labelTextStyle, .title3)
+  }
+
   func testDynamicIslandQrScannerRecognizesTallSafeAreas() {
     for safeAreaTopInset in [51, 59, 62] {
       XCTAssertTrue(
@@ -225,6 +299,15 @@ class RunnerTests: XCTestCase {
     let url = try XCTUnwrap(
       Bundle(for: RunnerTests.self).url(forResource: name, withExtension: fileExtension))
     return try Data(contentsOf: url)
+  }
+}
+
+private final class KeyboardDismissalSpyWindow: UIWindow {
+  private(set) var didForceEndEditing = false
+
+  override func endEditing(_ force: Bool) -> Bool {
+    didForceEndEditing = force
+    return true
   }
 }
 

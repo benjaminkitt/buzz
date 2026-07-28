@@ -1,6 +1,43 @@
 import Flutter
 import UIKit
 
+enum NativeAttachmentExpandedSurfaceBehavior {
+  @MainActor
+  static func dismissKeyboard(in window: UIWindow?) {
+    window?.endEditing(true)
+  }
+
+  static func keyboardOverlap(
+    containerBounds: CGRect,
+    keyboardLayoutFrame: CGRect
+  ) -> CGFloat {
+    guard
+      !keyboardLayoutFrame.isNull,
+      !keyboardLayoutFrame.isInfinite,
+      keyboardLayoutFrame.minY < containerBounds.maxY
+    else {
+      return 0
+    }
+    return max(0, containerBounds.maxY - keyboardLayoutFrame.minY)
+  }
+}
+
+enum NativeAttachmentPopoverAnchorLayout {
+  static let expandedVerticalOffset: CGFloat = 40
+
+  static func sourceRect(
+    anchorBounds: CGRect,
+    keyboardDismissalOffset: CGFloat,
+    isExpanded: Bool
+  ) -> CGRect {
+    anchorBounds.offsetBy(
+      dx: 0,
+      dy: keyboardDismissalOffset
+        + (isExpanded ? expandedVerticalOffset : 0)
+    )
+  }
+}
+
 final class NativeAttachmentPopoverCoordinator: NSObject {
   private let channel: FlutterMethodChannel
   private weak var parentViewController: UIViewController?
@@ -175,6 +212,20 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
   }
 }
 
+enum NativeAttachmentMenuLayout {
+  static let itemCount: CGFloat = 4
+  static let contentPadding: CGFloat = 16
+  static let itemHeight: CGFloat = 52
+  static let itemSpacing: CGFloat = 8
+  static let labelTextStyle: UIFont.TextStyle = .title3
+  static let size = CGSize(
+    width: 216,
+    height: (contentPadding * 2)
+      + (itemHeight * itemCount)
+      + (itemSpacing * (itemCount - 1))
+  )
+}
+
 func makeNativeAttachmentMenuButton(
   title: String,
   symbol: String,
@@ -200,7 +251,9 @@ func makeNativeAttachmentMenuButton(
   let titleLabel = UILabel()
   titleLabel.text = title
   titleLabel.textColor = .label
-  titleLabel.font = .preferredFont(forTextStyle: .body)
+  titleLabel.font = .preferredFont(
+    forTextStyle: NativeAttachmentMenuLayout.labelTextStyle
+  )
   titleLabel.adjustsFontForContentSizeCategory = true
   titleLabel.textAlignment = .left
   titleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -208,7 +261,10 @@ func makeNativeAttachmentMenuButton(
   button.addSubview(iconView)
   button.addSubview(titleLabel)
   NSLayoutConstraint.activate([
-    iconView.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14),
+    iconView.leadingAnchor.constraint(
+      equalTo: button.leadingAnchor,
+      constant: 8
+    ),
     iconView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
     iconView.widthAnchor.constraint(equalToConstant: 26),
     titleLabel.leadingAnchor.constraint(
@@ -217,7 +273,7 @@ func makeNativeAttachmentMenuButton(
     ),
     titleLabel.trailingAnchor.constraint(
       equalTo: button.trailingAnchor,
-      constant: -14
+      constant: -8
     ),
     titleLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor),
   ])

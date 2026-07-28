@@ -544,6 +544,58 @@ void main() {
       }
     });
 
+    testWidgets('opening the native attachment popover keeps composer focus', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var presentCalls = 0;
+      _setMockNativeAttachmentPopoverHandler((call) async {
+        switch (call.method) {
+          case 'isSupported':
+            return true;
+          case 'present':
+            presentCalls += 1;
+            return true;
+          case 'dismiss':
+            return null;
+        }
+        return null;
+      });
+
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'Hello');
+        await tester.pumpAndSettle();
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+
+        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(presentCalls, 1);
+        expect(textField.focusNode?.hasFocus, isTrue);
+      } finally {
+        await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+        await tester.pumpWidget(const SizedBox.shrink());
+        _setMockNativeAttachmentPopoverHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('disposing a non-owner keeps native popover callbacks active', (
       tester,
     ) async {
@@ -889,6 +941,121 @@ void main() {
       );
       expect(find.text('Camera'), findsOneWidget);
       expect(find.text('Photos'), findsOneWidget);
+    });
+
+    testWidgets('attachment menu uses roomy rows and surrounding padding', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+
+      final menu = find.byKey(const ValueKey('attachment-menu'));
+      final rows = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-item-$label')),
+      ];
+      final menuRect = tester.getRect(menu);
+
+      expect(menuRect.size, const Size(216, 264));
+      for (final row in rows) {
+        expect(tester.getSize(row).height, 52);
+        expect(tester.getRect(row).left - menuRect.left, Grid.xs);
+        expect(menuRect.right - tester.getRect(row).right, Grid.xs);
+      }
+      for (final label in ['Camera', 'Photos', 'Video', 'Files']) {
+        final text = tester.widget<Text>(find.text(label));
+        expect(text.style?.fontSize, 20);
+      }
+      final icons = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-icon-$label')),
+      ];
+      final labels = [
+        for (final label in ['camera', 'photos', 'video', 'files'])
+          find.byKey(ValueKey('attachment-menu-label-$label')),
+      ];
+      for (final icon in icons) {
+        expect(tester.getSize(icon).width, 28);
+        expect(
+          tester
+              .widget<Icon>(
+                find.descendant(of: icon, matching: find.byType(Icon)),
+              )
+              .size,
+          24,
+        );
+      }
+      final labelLeft = tester.getRect(labels.first).left;
+      for (var index = 0; index < labels.length; index += 1) {
+        expect(tester.getRect(labels[index]).left, labelLeft);
+        expect(
+          tester.getRect(labels[index]).center.dy,
+          tester.getRect(rows[index]).center.dy,
+        );
+      }
+      expect(tester.getRect(rows.first).top - menuRect.top, Grid.xs);
+      expect(menuRect.bottom - tester.getRect(rows.last).bottom, Grid.xs);
+      for (var index = 1; index < rows.length; index += 1) {
+        expect(
+          tester.getRect(rows[index]).top -
+              tester.getRect(rows[index - 1]).bottom,
+          Grid.xxs,
+        );
+      }
+    });
+
+    testWidgets('defers camera startup until the surface morph finishes', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Camera'));
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('camera-initialization-deferred')),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.byKey(const ValueKey('camera-initialization-deferred')),
+          findsOneWidget,
+        );
+
+        await tester.pump(const Duration(milliseconds: 20));
+        expect(
+          find.byKey(const ValueKey('camera-initialization-ready')),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('photo picker errors keep the action visible at large text', (
