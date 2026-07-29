@@ -1,0 +1,280 @@
+# Fork release pipeline.
+#
+# Upstream's release.yml is guarded with `if: github.repository == 'block/buzz'`
+# and depends on Block's Apple Developer ID and Tauri updater secrets, so it
+# cannot run here. This workflow rebuilds the same macOS (arm64) and Linux
+# artifacts from an upstream tag with one change applied: tokio-tungstenite is
+# built with `rustls-tls-native-roots` in addition to `rustls-tls-webpki-roots`,
+# so the relay WebSocket honours the OS trust store. See FORK-NOTES.md.
+#
+# Differences from upstream's pipeline, all consequences of not having Block's
+# secrets:
+#   * no Developer ID signing and no notarization (artifacts are unsigned)
+#   * no Tauri updater config, so the built app has no self-updater
+#   * no x86_64 macOS or Windows artifacts (not needed by the consumer)
+name: Fork Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version to build, without the leading v (e.g. 0.5.0). Defaults to upstream's latest release."
+        required: false
+  schedule:
+    # Daily; resolve-upstream exits early when the fork already has the release.
+    - cron: "17 6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-upstream:
+    name: Resolve upstream release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      needed: ${{ steps.pick.outputs.needed }}
+    steps:
+      - name: Pick version and decide whether a build is needed
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${REQUESTED}" ]]; then
+            VERSION="${REQUESTED#v}"
+          else
+            VERSION=$(gh release view --repo block/buzz --json tagName -q .tagName)
+            VERSION="${VERSION#v}"
+          fi
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Skip when this fork already published the release, unless dispatched
+          # explicitly (an explicit dispatch is treated as a rebuild request).
+          if [[ -z "${REQUESTED}" ]] \
+             && gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${TAG} already released on this fork; nothing to do."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Will build ${TAG}."
+          fi
+
+  # Re-point the fork's tag at the patched commit so the published tag matches
+  # the source the binaries were actually built from. Forks inherit upstream's
+  # tags, hence the force update. The patch touches Cargo.toml only, never
+  # .github/workflows, so the default GITHUB_TOKEN is allowed to push it.
+  patch-and-tag:
+    name: Patch and tag
+    needs: resolve-upstream
+    if: needs.resolve-upstream.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream tag
+        env:
+          TAG: ${{ needs.resolve-upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/block/buzz.git
+          git fetch --no-tags upstream "refs/tags/${TAG}:refs/upstream-tags/${TAG}"
+
+      # Stash the patch script before detaching: it lives on this fork's default
+      # branch and is not present in the upstream tag we are about to check out.
+      - name: Stage patch script
+        run: cp .github/scripts/apply-native-roots.sh "${RUNNER_TEMP}/apply-native-roots.sh"
+
+      - name: Apply native-roots patch and commit
+        id: commit
+        env:
+          TAG: ${{ needs.resolve-upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "refs/upstream-tags/${TAG}"
+          bash "${RUNNER_TEMP}/apply-native-roots.sh"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml desktop/src-tauri/Cargo.toml
+          git commit \
+            -m "build: trust the OS certificate store on the relay WebSocket" \
+            -m "Adds rustls-tls-native-roots alongside rustls-tls-webpki-roots so tokio-tungstenite's default root store includes the platform trust store. The two features are additive, so the bundled Mozilla roots are retained." \
+            -m "Without this the relay WebSocket fails with 'invalid peer certificate: UnknownIssuer' behind a TLS-inspecting proxy. Fork-only change; see FORK-NOTES.md."
+          SHA=$(git rev-parse HEAD)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          git push --force origin "HEAD:refs/tags/${TAG}"
+
+  macos:
+    name: macOS (aarch64)
+    needs: [resolve-upstream, patch-and-tag]
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.patch-and-tag.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Build Tauri app
+        run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --bundles app,dmg
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+
+      # Tauri leaves the bundle linker-signed with a per-binary identifier. Seal
+      # it ad-hoc under the real bundle id so the code identity is stable across
+      # launches, which TCC (camera, microphone, keychain) keys off. Entitlements
+      # and the hardened runtime are intentionally omitted: without Block's
+      # Developer ID they buy nothing, TCC prompts come from the Info.plist usage
+      # descriptions, and library validation is not enforced unless hardened.
+      - name: Ad-hoc sign bundle
+        run: |
+          set -euo pipefail
+          APP="desktop/src-tauri/target/release/bundle/macos/Buzz.app"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Repack DMG from the signed app
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/release/bundle"
+          DMG=$(find "$BUNDLE_DIR/dmg" -name '*.dmg' -type f | head -1)
+          [[ -n "$DMG" ]] || { echo "::error::No DMG produced"; exit 1; }
+          STAGE="${RUNNER_TEMP}/dmg-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          cp -R "${BUNDLE_DIR}/macos/Buzz.app" "$STAGE/Buzz.app"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f "$DMG"
+          hdiutil create -volname Buzz -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          echo "Repacked $DMG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-aarch64
+          path: desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: Linux (x86_64)
+    needs: [resolve-upstream, patch-and-tag]
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    timeout-minutes: 90
+    steps:
+      # Bare ubuntu:22.04 has no curl, wget, git or ca-certificates;
+      # activate-hermit bootstraps over HTTPS and checkout needs git.
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -o Acquire::Retries=3
+          apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            build-essential ca-certificates curl desktop-file-utils file git \
+            libasound2-dev libayatana-appindicator3-dev libgtk-3-dev \
+            librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            patchelf pkg-config squashfs-tools wget xdg-utils
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.patch-and-tag.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      # Pinned to immutable tags rather than `continuous`, matching upstream.
+      - name: Install appimagetool
+        run: |
+          set -euo pipefail
+          wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+          wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
+          echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Build Tauri app
+        run: cd desktop && pnpm tauri build --verbose --ci --bundles deb,appimage
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-x86_64
+          path: |
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [resolve-upstream, patch-and-tag, macos, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-upstream.outputs.tag }}
+          VERSION: ${{ needs.resolve-upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          Unofficial rebuild of upstream [block/buzz \`${TAG}\`](https://github.com/block/buzz/releases/tag/${TAG}) with a single change: \`tokio-tungstenite\` is built with \`rustls-tls-native-roots\` in addition to \`rustls-tls-webpki-roots\`, so the relay WebSocket trusts the OS certificate store.
+
+          This is required behind a TLS-inspecting proxy, where the stock build fails with \`invalid peer certificate: UnknownIssuer\`.
+
+          **These binaries are unsigned and un-notarized** — this fork has no Apple Developer ID, so the macOS bundle is ad-hoc signed only and macOS will re-prompt for keychain, camera and microphone access. The self-updater is disabled.
+
+          See [FORK-NOTES.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/FORK-NOTES.md).
+          EOF
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG (native roots)" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            dist/*

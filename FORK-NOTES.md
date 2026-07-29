@@ -1,0 +1,80 @@
+# Fork notes
+
+This is a fork of [block/buzz](https://github.com/block/buzz), maintained for one
+purpose: to publish builds that work behind a TLS-inspecting corporate proxy.
+
+## The change
+
+Modified files, per Apache-2.0 §4(b):
+
+- `Cargo.toml` — root workspace
+- `desktop/src-tauri/Cargo.toml` — desktop workspace
+
+In both, the `tokio-tungstenite` dependency gains the `rustls-tls-native-roots`
+feature alongside the existing `rustls-tls-webpki-roots`:
+
+```diff
+-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
++tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
+```
+
+Applied by `.github/scripts/apply-native-roots.sh`. Nothing else is changed.
+
+## Why
+
+Upstream builds `tokio-tungstenite` with only `rustls-tls-webpki-roots`, and
+`desktop/src-tauri/src/native_websocket.rs` calls bare `connect_async()` with no
+custom `Connector`. The relay WebSocket therefore trusts a compiled-in Mozilla
+root list and nothing else — not the macOS keychain, not `SSL_CERT_FILE`, not
+`NODE_EXTRA_CA_CERTS`.
+
+Behind a TLS-inspecting proxy (Netskope, Zscaler, Palo Alto, …) the relay's
+certificate is re-signed by a corporate CA, and the connection fails with:
+
+```
+invalid peer certificate: UnknownIssuer
+```
+
+This is invisible in most of the app because HTTPS requests go through `reqwest`,
+which uses `rustls-platform-verifier` and *does* read the OS trust store. Only
+the WebSocket path is affected, so the app appears healthy right up until the
+relay never connects. The sidecars `buzz`, `buzz-acp` and `buzz-dev-mcp` share
+the root workspace dependency and fail the same way; `buzz-agent` uses
+`reqwest` only and is unaffected.
+
+The two root-store features are additive — tokio-tungstenite's `tls.rs` pushes
+both sets into a single `RootCertStore`, and the webpki branch is not gated on
+`not(rustls-tls-native-roots)` — so this preserves upstream behaviour for the
+public web and additionally honours the platform store.
+
+Measured against a real proxied relay: `webpki-roots only => UnknownIssuer`,
+`native + webpki roots => connected`, with 148 additional roots loaded from the
+keychain.
+
+## How these builds differ from upstream's
+
+`.github/workflows/fork-release.yml` rebuilds upstream's macOS (arm64) and Linux
+artifacts. Upstream's `release.yml` is guarded with
+`if: github.repository == 'block/buzz'` and needs Block's secrets, so it cannot
+run here. Consequences:
+
+- **Unsigned and un-notarized.** No Apple Developer ID. The macOS bundle is
+  ad-hoc signed only, so macOS will re-prompt for keychain, camera and
+  microphone access, and Gatekeeper will object if the DMG is downloaded through
+  a browser. The hardened runtime and the `Entitlements.plist` entitlements are
+  not applied; without a Developer ID they would add nothing, TCC prompts come
+  from the `Info.plist` usage descriptions, and library validation is not
+  enforced unless the hardened runtime is on.
+- **No self-updater.** Upstream's updater config needs signing keys. These builds
+  have no updater, which suits a package-manager-managed install.
+- **arm64 macOS and x86_64 Linux only.** No Intel macOS, no Windows.
+
+Release tags match upstream's (`v0.5.0`, …) but are force-updated to point at the
+patched commit, so a tag here always names the exact source its binaries were
+built from.
+
+## Upstreaming
+
+The intent is for this fork to become unnecessary. The change has been proposed
+upstream; if it lands, these builds should be abandoned in favour of official
+signed releases.
