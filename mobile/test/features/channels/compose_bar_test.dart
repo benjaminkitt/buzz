@@ -596,6 +596,52 @@ void main() {
       }
     });
 
+    testWidgets(
+      'unsupported iOS attachment popover unfocuses before fallback menu',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        _setMockNativeAttachmentPopoverHandler((call) async {
+          return switch (call.method) {
+            'isSupported' => false,
+            'dismiss' => null,
+            _ => null,
+          };
+        });
+
+        try {
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: _testUploadService(nostr.Keys.generate().nsec),
+              onSend:
+                  (
+                    content,
+                    mentionPubkeys, {
+                    mediaTags = const <List<String>>[],
+                  }) async {},
+            ),
+          );
+
+          await _expandComposer(tester);
+          await tester.enterText(find.byType(TextField), 'Hello');
+          await tester.pumpAndSettle();
+
+          final textField = tester.widget<TextField>(find.byType(TextField));
+          expect(textField.focusNode?.hasFocus, isTrue);
+
+          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await tester.pumpAndSettle();
+
+          expect(textField.focusNode?.hasFocus, isFalse);
+          expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          _setMockNativeAttachmentPopoverHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     testWidgets('disposing a non-owner keeps native popover callbacks active', (
       tester,
     ) async {

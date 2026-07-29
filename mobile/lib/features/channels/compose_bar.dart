@@ -766,7 +766,10 @@ class ComposeBar extends HookConsumerWidget {
               }),
             )
             .then((didPresent) {
-              if (!didPresent && context.mounted) toggleAttachments();
+              if (!didPresent && context.mounted) {
+                focusNode.unfocus();
+                toggleAttachments();
+              }
             }),
       );
     }
