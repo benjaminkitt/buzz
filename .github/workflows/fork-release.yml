@@ -168,7 +168,9 @@ jobs:
           cp -R "${BUNDLE_DIR}/macos/Buzz.app" "$STAGE/Buzz.app"
           ln -s /Applications "$STAGE/Applications"
           rm -f "$DMG"
-          hdiutil create -volname Buzz -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+          # -fs HFS+ is required: hdiutil now defaults to APFS, which `undmg`
+          # (used by the Nix consumer to unpack this) cannot read at all.
+          hdiutil create -volname Buzz -srcfolder "$STAGE" -ov -format UDZO -fs HFS+ "$DMG"
           echo "Repacked $DMG"
 
       - name: Upload artifact
@@ -184,6 +186,11 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
     timeout-minutes: 90
+    # GitHub runs container steps with `sh -e` by default, and dash rejects
+    # `set -o pipefail`. Pin bash explicitly (present in the base image).
+    defaults:
+      run:
+        shell: bash
     steps:
       # Bare ubuntu:22.04 has no curl, wget, git or ca-certificates;
       # activate-hermit bootstraps over HTTPS and checkout needs git.
