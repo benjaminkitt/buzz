@@ -279,9 +279,14 @@ jobs:
 
           See [FORK-NOTES.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/FORK-NOTES.md).
           EOF
+          # The Linux artifact keeps its appimage/ and deb/ subdirectories, so a
+          # dist/* glob would hand gh a directory and fail the upload.
+          mapfile -t ASSETS < <(find dist -type f | sort)
+          [[ ${#ASSETS[@]} -gt 0 ]] || { echo "::error::no release assets found"; exit 1; }
+          printf 'uploading: %s\n' "${ASSETS[@]}"
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG (native roots)" \
             --notes-file "${RUNNER_TEMP}/notes.md" \
-            dist/*
+            "${ASSETS[@]}"
