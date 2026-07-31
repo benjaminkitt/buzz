@@ -69,10 +69,11 @@ run here. Consequences:
   have no updater, which suits a package-manager-managed install.
 - **arm64 macOS and x86_64 Linux only.** No Intel macOS, no Windows.
 
-Release tags match upstream's (`v0.5.0`, …) and point at the **unmodified
-upstream release commit**. The patch is applied to a throwaway working tree
-during the build and is never committed; each release records the exact upstream
-commit it was built from in its notes.
+Release tags match upstream's (`v0.5.0`, …) but are **only version markers**:
+they are created at this fork's default branch, and the commit a tag names is
+*not* the build source. The patch is applied to a throwaway working tree during
+the build and is never committed. Each release's notes record the exact upstream
+commit it was built from — that is the authoritative provenance.
 
 That indirection is forced rather than chosen. The default `GITHUB_TOKEN` is a
 GitHub App token, and GitHub rejects any push whose ref introduces a created or
@@ -86,8 +87,14 @@ refusing to allow a GitHub App to create or update workflow
 ```
 
 Creating the tag through the REST API instead is a ref creation rather than a
-push, and is unaffected. Restoring committed patch tags would need a PAT or
-deploy key with `workflows` write access stored as a repository secret.
+push, and is unaffected — but it can only target a commit reachable from a fork
+ref. Pointing a tag at the upstream release commit is refused with
+`HTTP 403: Resource not accessible by integration`, even though the object
+resolves through the shared fork network.
+
+Making tags name the real build source would need a PAT or deploy key with
+`workflows` write access stored as a repository secret. That is the only thing
+the current setup gives up, and the release notes cover it.
 
 ## Upstreaming
 

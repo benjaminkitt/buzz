@@ -277,7 +277,7 @@ jobs:
 
           This is required behind a TLS-inspecting proxy, where the stock build fails with \`invalid peer certificate: UnknownIssuer\`.
 
-          Built from upstream commit [\`${SHA}\`](https://github.com/block/buzz/commit/${SHA}) with [\`.github/scripts/apply-native-roots.sh\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/.github/scripts/apply-native-roots.sh) applied at build time. This tag points at that unmodified upstream commit; the two-line patch is not committed anywhere.
+Built from upstream commit [\`${SHA}\`](https://github.com/block/buzz/commit/${SHA}) with [\`.github/scripts/apply-native-roots.sh\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/.github/scripts/apply-native-roots.sh) applied at build time. The patch is not committed anywhere, and this release's tag is only a version marker on this fork's default branch — the commit it names is *not* the build source. The upstream commit above is.
 
           **These binaries are unsigned and un-notarized** — this fork has no Apple Developer ID, so the macOS bundle is ad-hoc signed only and macOS will re-prompt for keychain, camera and microphone access. The self-updater is disabled.
 
@@ -292,20 +292,17 @@ jobs:
 
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
 
-          # --target creates the tag via the REST API at the upstream commit.
-          # Forks share an object store with the parent, so that SHA resolves
-          # here even though no fork ref reaches it. Falls back to the default
-          # branch if GitHub declines the cross-network target.
-          if ! gh release create "$TAG" \
-                 --repo "$GITHUB_REPOSITORY" \
-                 --target "$SHA" \
-                 --title "$TAG (native roots)" \
-                 --notes-file "${RUNNER_TEMP}/notes.md" \
-                 "${ASSETS[@]}"; then
-            echo "::warning::Creating the tag at ${SHA} failed; retrying against the default branch."
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$TAG (native roots)" \
-              --notes-file "${RUNNER_TEMP}/notes.md" \
-              "${ASSETS[@]}"
-          fi
+          # The tag is created at the default branch, and is only a version
+          # marker: the notes record the upstream commit that was actually
+          # built. Targeting the upstream commit directly is not possible —
+          # although a fork shares an object store with its parent (so the SHA
+          # resolves here), the App token is refused with
+          #   HTTP 403: Resource not accessible by integration
+          # when creating a release at a commit no fork ref reaches. Pushing a
+          # ref to make it reachable is blocked in turn by the workflow-file
+          # restriction described at the top of this file.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG (native roots)" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            "${ASSETS[@]}"
