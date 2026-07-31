@@ -277,7 +277,7 @@ jobs:
 
           This is required behind a TLS-inspecting proxy, where the stock build fails with \`invalid peer certificate: UnknownIssuer\`.
 
-Built from upstream commit [\`${SHA}\`](https://github.com/block/buzz/commit/${SHA}) with [\`.github/scripts/apply-native-roots.sh\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/.github/scripts/apply-native-roots.sh) applied at build time. The patch is not committed anywhere, and this release's tag is only a version marker on this fork's default branch — the commit it names is *not* the build source. The upstream commit above is.
+          Built from upstream commit [\`${SHA}\`](https://github.com/block/buzz/commit/${SHA}) with [\`.github/scripts/apply-native-roots.sh\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/.github/scripts/apply-native-roots.sh) applied at build time. The patch is not committed anywhere, and this release's tag is only a version marker on this fork's default branch — the commit it names is *not* the build source. The upstream commit above is.
 
           **These binaries are unsigned and un-notarized** — this fork has no Apple Developer ID, so the macOS bundle is ad-hoc signed only and macOS will re-prompt for keychain, camera and microphone access. The self-updater is disabled.
 
