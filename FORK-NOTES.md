@@ -69,9 +69,25 @@ run here. Consequences:
   have no updater, which suits a package-manager-managed install.
 - **arm64 macOS and x86_64 Linux only.** No Intel macOS, no Windows.
 
-Release tags match upstream's (`v0.5.0`, …) but are force-updated to point at the
-patched commit, so a tag here always names the exact source its binaries were
-built from.
+Release tags match upstream's (`v0.5.0`, …) and point at the **unmodified
+upstream release commit**. The patch is applied to a throwaway working tree
+during the build and is never committed; each release records the exact upstream
+commit it was built from in its notes.
+
+That indirection is forced rather than chosen. The default `GITHUB_TOKEN` is a
+GitHub App token, and GitHub rejects any push whose ref introduces a created or
+updated file under `.github/workflows` without the `workflows` permission, which
+App tokens cannot hold. Upstream edits its own workflows between releases, so
+pushing a tag at a new upstream commit fails with:
+
+```
+refusing to allow a GitHub App to create or update workflow
+`.github/workflows/linux-canary.yml` without `workflows` permission
+```
+
+Creating the tag through the REST API instead is a ref creation rather than a
+push, and is unaffected. Restoring committed patch tags would need a PAT or
+deploy key with `workflows` write access stored as a repository secret.
 
 ## Upstreaming
 

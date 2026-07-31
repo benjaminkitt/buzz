@@ -12,13 +12,23 @@
 #   * no Developer ID signing and no notarization (artifacts are unsigned)
 #   * no Tauri updater config, so the built app has no self-updater
 #   * no x86_64 macOS or Windows artifacts (not needed by the consumer)
+#
+# Note on why nothing here does `git push`: the default GITHUB_TOKEN is a GitHub
+# App token, and GitHub refuses any push whose ref introduces a created/updated
+# file under .github/workflows without the `workflows` permission — which App
+# tokens cannot hold. Upstream edits its own workflows between releases, so
+# pushing a tag at a new upstream commit is rejected with
+#   "refusing to allow a GitHub App to create or update workflow ... "
+# The patch is therefore applied to a throwaway working tree in each build job,
+# and the release tag is created through the REST API (which is a ref creation,
+# not a push, and so is unaffected).
 name: Fork Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Upstream version to build, without the leading v (e.g. 0.5.0). Defaults to upstream's latest release."
+        description: "Upstream version to build, without the leading v (e.g. 0.5.2). Defaults to upstream's latest release."
         required: false
   schedule:
     # Daily; resolve-upstream exits early when the fork already has the release.
@@ -35,6 +45,7 @@ jobs:
     outputs:
       version: ${{ steps.pick.outputs.version }}
       tag: ${{ steps.pick.outputs.tag }}
+      sha: ${{ steps.pick.outputs.sha }}
       needed: ${{ steps.pick.outputs.needed }}
     steps:
       - name: Pick version and decide whether a build is needed
@@ -51,8 +62,15 @@ jobs:
             VERSION="${VERSION#v}"
           fi
           TAG="v${VERSION}"
+
+          # Resolve the tag to a commit SHA up front so every job builds the
+          # exact same source, even if upstream moves the tag mid-run.
+          SHA=$(gh api "repos/block/buzz/commits/${TAG}" -q .sha)
+          [[ -n "$SHA" ]] || { echo "::error::could not resolve ${TAG} upstream"; exit 1; }
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
           # Skip when this fork already published the release, unless dispatched
           # explicitly (an explicit dispatch is treated as a rebuild request).
@@ -62,69 +80,38 @@ jobs:
             echo "::notice::${TAG} already released on this fork; nothing to do."
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Will build ${TAG}."
+            echo "::notice::Will build ${TAG} (${SHA})."
           fi
-
-  # Re-point the fork's tag at the patched commit so the published tag matches
-  # the source the binaries were actually built from. Forks inherit upstream's
-  # tags, hence the force update. The patch touches Cargo.toml only, never
-  # .github/workflows, so the default GITHUB_TOKEN is allowed to push it.
-  patch-and-tag:
-    name: Patch and tag
-    needs: resolve-upstream
-    if: needs.resolve-upstream.outputs.needed == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      sha: ${{ steps.commit.outputs.sha }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
-
-      - name: Fetch upstream tag
-        env:
-          TAG: ${{ needs.resolve-upstream.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git remote add upstream https://github.com/block/buzz.git
-          git fetch --no-tags upstream "refs/tags/${TAG}:refs/upstream-tags/${TAG}"
-
-      # Stash the patch script before detaching: it lives on this fork's default
-      # branch and is not present in the upstream tag we are about to check out.
-      - name: Stage patch script
-        run: cp .github/scripts/apply-native-roots.sh "${RUNNER_TEMP}/apply-native-roots.sh"
-
-      - name: Apply native-roots patch and commit
-        id: commit
-        env:
-          TAG: ${{ needs.resolve-upstream.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git checkout --detach "refs/upstream-tags/${TAG}"
-          bash "${RUNNER_TEMP}/apply-native-roots.sh"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml desktop/src-tauri/Cargo.toml
-          git commit \
-            -m "build: trust the OS certificate store on the relay WebSocket" \
-            -m "Adds rustls-tls-native-roots alongside rustls-tls-webpki-roots so tokio-tungstenite's default root store includes the platform trust store. The two features are additive, so the bundled Mozilla roots are retained." \
-            -m "Without this the relay WebSocket fails with 'invalid peer certificate: UnknownIssuer' behind a TLS-inspecting proxy. Fork-only change; see FORK-NOTES.md."
-          SHA=$(git rev-parse HEAD)
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          git push --force origin "HEAD:refs/tags/${TAG}"
 
   macos:
     name: macOS (aarch64)
-    needs: [resolve-upstream, patch-and-tag]
+    needs: resolve-upstream
+    if: needs.resolve-upstream.outputs.needed == 'true'
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
+      # Upstream source at the release commit, checked out at the workspace root
+      # so hermit and the repo's own tooling resolve normally.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.patch-and-tag.outputs.sha }}
+          repository: block/buzz
+          ref: ${{ needs.resolve-upstream.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      # This fork's patch script is not present in the upstream tree; fetch it
+      # into a subdirectory, use it, then remove it so the build tree is clean.
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: fork-tools
+          persist-credentials: false
+
+      - name: Apply native-roots patch
+        run: |
+          set -euo pipefail
+          bash fork-tools/.github/scripts/apply-native-roots.sh
+          rm -rf fork-tools
+          git --no-pager diff --stat
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -182,7 +169,8 @@ jobs:
 
   linux:
     name: Linux (x86_64)
-    needs: [resolve-upstream, patch-and-tag]
+    needs: resolve-upstream
+    if: needs.resolve-upstream.outputs.needed == 'true'
     runs-on: ubuntu-latest
     container: ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
     timeout-minutes: 90
@@ -206,12 +194,25 @@ jobs:
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ needs.patch-and-tag.outputs.sha }}
+          repository: block/buzz
+          ref: ${{ needs.resolve-upstream.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: fork-tools
           persist-credentials: false
 
       - name: Mark workspace safe for git (containerized job)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Apply native-roots patch
+        run: |
+          set -euo pipefail
+          bash fork-tools/.github/scripts/apply-native-roots.sh
+          rm -rf fork-tools
+          git --no-pager diff --stat
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -253,7 +254,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [resolve-upstream, patch-and-tag, macos, linux]
+    needs: [resolve-upstream, macos, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -267,6 +268,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve-upstream.outputs.tag }}
           VERSION: ${{ needs.resolve-upstream.outputs.version }}
+          SHA: ${{ needs.resolve-upstream.outputs.sha }}
         run: |
           set -euo pipefail
           ls -la dist
@@ -275,18 +277,35 @@ jobs:
 
           This is required behind a TLS-inspecting proxy, where the stock build fails with \`invalid peer certificate: UnknownIssuer\`.
 
+          Built from upstream commit [\`${SHA}\`](https://github.com/block/buzz/commit/${SHA}) with [\`.github/scripts/apply-native-roots.sh\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/.github/scripts/apply-native-roots.sh) applied at build time. This tag points at that unmodified upstream commit; the two-line patch is not committed anywhere.
+
           **These binaries are unsigned and un-notarized** — this fork has no Apple Developer ID, so the macOS bundle is ad-hoc signed only and macOS will re-prompt for keychain, camera and microphone access. The self-updater is disabled.
 
           See [FORK-NOTES.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/FORK-NOTES.md).
           EOF
+
           # The Linux artifact keeps its appimage/ and deb/ subdirectories, so a
           # dist/* glob would hand gh a directory and fail the upload.
           mapfile -t ASSETS < <(find dist -type f | sort)
           [[ ${#ASSETS[@]} -gt 0 ]] || { echo "::error::no release assets found"; exit 1; }
           printf 'uploading: %s\n' "${ASSETS[@]}"
+
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG (native roots)" \
-            --notes-file "${RUNNER_TEMP}/notes.md" \
-            "${ASSETS[@]}"
+
+          # --target creates the tag via the REST API at the upstream commit.
+          # Forks share an object store with the parent, so that SHA resolves
+          # here even though no fork ref reaches it. Falls back to the default
+          # branch if GitHub declines the cross-network target.
+          if ! gh release create "$TAG" \
+                 --repo "$GITHUB_REPOSITORY" \
+                 --target "$SHA" \
+                 --title "$TAG (native roots)" \
+                 --notes-file "${RUNNER_TEMP}/notes.md" \
+                 "${ASSETS[@]}"; then
+            echo "::warning::Creating the tag at ${SHA} failed; retrying against the default branch."
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG (native roots)" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              "${ASSETS[@]}"
+          fi
