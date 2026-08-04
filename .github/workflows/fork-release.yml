@@ -145,7 +145,15 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          set -euo pipefail
+          # Derive the package list from upstream's own bundler script so
+          # the build tracks whichever sidecars this tag requires, instead of
+          # hardcoding them here (upstream added buzz-backend-kubernetes in
+          # 0.5.4, which broke the hardcoded list).
+          BUILD_CMD=$(grep -oE "cargo build --release( -p [A-Za-z0-9_-]+)+" scripts/bundle-sidecars.sh | head -1)
+          [[ -n "$BUILD_CMD" ]] || { echo "::error::could not derive sidecar build command from scripts/bundle-sidecars.sh"; exit 1; }
+          echo "building: $BUILD_CMD"
+          $BUILD_CMD
           ./scripts/bundle-sidecars.sh
 
       - name: Build Tauri app
@@ -260,7 +268,15 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          set -euo pipefail
+          # Derive the package list from upstream's own bundler script so
+          # the build tracks whichever sidecars this tag requires, instead of
+          # hardcoding them here (upstream added buzz-backend-kubernetes in
+          # 0.5.4, which broke the hardcoded list).
+          BUILD_CMD=$(grep -oE "cargo build --release( -p [A-Za-z0-9_-]+)+" scripts/bundle-sidecars.sh | head -1)
+          [[ -n "$BUILD_CMD" ]] || { echo "::error::could not derive sidecar build command from scripts/bundle-sidecars.sh"; exit 1; }
+          echo "building: $BUILD_CMD"
+          $BUILD_CMD
           ./scripts/bundle-sidecars.sh
 
       - name: Build Tauri app
