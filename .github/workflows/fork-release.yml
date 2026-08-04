@@ -72,6 +72,13 @@ jobs:
           else
             UPSTREAM_TAG=$(gh release view --repo block/buzz --json tagName -q .tagName)
             [[ -n "$UPSTREAM_TAG" ]] || { echo "::error::could not determine upstream's latest release"; exit 1; }
+            # Fail fast if upstream's latest release is neither a desktop tag
+            # nor a plain v tag (e.g. a mobile-v* release would otherwise be
+            # misinterpreted rather than built correctly).
+            if [[ "$UPSTREAM_TAG" != desktop-v* && "$UPSTREAM_TAG" != v* ]]; then
+              echo "::error::upstream's latest release '${UPSTREAM_TAG}' is not a desktop release; refusing to guess"
+              exit 1
+            fi
           fi
 
           # Normalise to bare semver regardless of which prefix upstream used,
