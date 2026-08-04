@@ -45,6 +45,7 @@ jobs:
     outputs:
       version: ${{ steps.pick.outputs.version }}
       tag: ${{ steps.pick.outputs.tag }}
+      upstream_tag: ${{ steps.pick.outputs.upstream_tag }}
       sha: ${{ steps.pick.outputs.sha }}
       needed: ${{ steps.pick.outputs.needed }}
     steps:
@@ -57,19 +58,36 @@ jobs:
           set -euo pipefail
           if [[ -n "${REQUESTED}" ]]; then
             VERSION="${REQUESTED#v}"
+            # Upstream tags desktop releases as desktop-v<semver> since 0.5.3;
+            # before that it was plain v<semver>. Probe both shapes so either
+            # can be requested by bare version.
+            UPSTREAM_TAG=""
+            for t in "desktop-v${VERSION}" "v${VERSION}"; do
+              if gh api "repos/block/buzz/commits/${t}" -q .sha >/dev/null 2>&1; then
+                UPSTREAM_TAG="$t"
+                break
+              fi
+            done
+            [[ -n "$UPSTREAM_TAG" ]] || { echo "::error::could not resolve a block/buzz tag for version ${VERSION}"; exit 1; }
           else
-            VERSION=$(gh release view --repo block/buzz --json tagName -q .tagName)
-            VERSION="${VERSION#v}"
+            UPSTREAM_TAG=$(gh release view --repo block/buzz --json tagName -q .tagName)
+            [[ -n "$UPSTREAM_TAG" ]] || { echo "::error::could not determine upstream's latest release"; exit 1; }
           fi
+
+          # Normalise to bare semver regardless of which prefix upstream used,
+          # and keep our own tag in the historical v<semver> shape.
+          VERSION="${UPSTREAM_TAG#desktop-}"
+          VERSION="${VERSION#v}"
           TAG="v${VERSION}"
 
           # Resolve the tag to a commit SHA up front so every job builds the
           # exact same source, even if upstream moves the tag mid-run.
-          SHA=$(gh api "repos/block/buzz/commits/${TAG}" -q .sha)
-          [[ -n "$SHA" ]] || { echo "::error::could not resolve ${TAG} upstream"; exit 1; }
+          SHA=$(gh api "repos/block/buzz/commits/${UPSTREAM_TAG}" -q .sha)
+          [[ -n "$SHA" ]] || { echo "::error::could not resolve ${UPSTREAM_TAG} upstream"; exit 1; }
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
           # Skip when this fork already published the release, unless dispatched
@@ -80,7 +98,7 @@ jobs:
             echo "::notice::${TAG} already released on this fork; nothing to do."
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Will build ${TAG} (${SHA})."
+            echo "::notice::Will build ${TAG} from upstream ${UPSTREAM_TAG} (${SHA})."
           fi
 
   macos:
@@ -267,13 +285,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve-upstream.outputs.tag }}
+          UPSTREAM_TAG: ${{ needs.resolve-upstream.outputs.upstream_tag }}
           VERSION: ${{ needs.resolve-upstream.outputs.version }}
           SHA: ${{ needs.resolve-upstream.outputs.sha }}
         run: |
           set -euo pipefail
           ls -la dist
           cat > "${RUNNER_TEMP}/notes.md" <<EOF
-          Unofficial rebuild of upstream [block/buzz \`${TAG}\`](https://github.com/block/buzz/releases/tag/${TAG}) with a single change: \`tokio-tungstenite\` is built with \`rustls-tls-native-roots\` in addition to \`rustls-tls-webpki-roots\`, so the relay WebSocket trusts the OS certificate store.
+          Unofficial rebuild of upstream [block/buzz \`${UPSTREAM_TAG}\`](https://github.com/block/buzz/releases/tag/${UPSTREAM_TAG}) with a single change: \`tokio-tungstenite\` is built with \`rustls-tls-native-roots\` in addition to \`rustls-tls-webpki-roots\`, so the relay WebSocket trusts the OS certificate store.
 
           This is required behind a TLS-inspecting proxy, where the stock build fails with \`invalid peer certificate: UnknownIssuer\`.
 
